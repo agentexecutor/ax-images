@@ -1,0 +1,81 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ax-test
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mock-anthropic
+  namespace: ax-test
+type: Opaque
+stringData:
+  # Throwaway test key only -- never store a real API key here.
+  key: test-key-e2e
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-anthropic
+  namespace: ax-test
+  labels:
+    app: mock-anthropic
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-anthropic
+  template:
+    metadata:
+      labels:
+        app: mock-anthropic
+    spec:
+      containers:
+        - name: mock
+          image: MOCK_ANTHROPIC_IMAGE_PLACEHOLDER
+          env:
+            - name: EXPECTED_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mock-anthropic
+                  key: key
+            - name: REPLY_TEXT
+              value: MOCK_OK
+            - name: PORT
+              value: "8080"
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-anthropic
+  namespace: ax-test
+spec:
+  selector:
+    app: mock-anthropic
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
