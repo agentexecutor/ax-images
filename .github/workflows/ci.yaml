@@ -39,3 +39,25 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/verify/boilerplate.sh
+
+  mock-gemini:
+    name: Fake Gemini server (selftest & build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run local HTTP selftest
+        run: fakes/mock-gemini/selftest.sh
+      - name: Build container image and verify /healthz
+        run: |
+          docker build -t mock-gemini:test fakes/mock-gemini
+          cid="$(docker run -d -p 18092:8080 -e EXPECTED_KEY=ci-test-key mock-gemini:test)"
+          trap 'docker rm -f "${cid}" >/dev/null' EXIT
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:18092/healthz >/dev/null 2>&1 && break
+            sleep 0.2
+          done
+          curl -fsS -X POST "http://127.0.0.1:18092/v1beta/models/gemini-mock:streamGenerateContent?alt=sse" \
+            -H "x-goog-api-key: ci-test-key" -H "content-type: application/json" \
+            -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}' | grep -q "MOCK_OK"
