@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ax-harness: Claude Code launcher for the AX in-container wrapper contract.
+#
+# Inputs provided by the mounted AX runner:
+#   AX_GOAL_FILE    path to the task's goal (spec.config.prompt)
+#   AX_CONFIG_FILE  optional path to spec.config serialized as JSON
+#   cwd             the task's workspace
+#
+# Optional environment variables:
+#   CLAUDE_CODE_VERSION        version passed to install.sh on runtime install
+#                              (default: "stable")
+#   CLAUDE_INSTALL_SCRIPT_URL  installer URL (default: https://claude.ai/install.sh)
+#   CLAUDE_BIN                 binary name or path (default: "claude")
+
+set -euo pipefail
+
+goal_file="${AX_GOAL_FILE:?AX_GOAL_FILE is not set; ax-harness must be started by the AX runner}"
+config_file="${AX_CONFIG_FILE:-}"
+
+if [[ ! -s "${goal_file}" ]]; then
+  echo "ax-harness: empty goal in ${goal_file}; set spec.config.prompt" >&2
+  exit 2
+fi
+
+export HOME="${HOME:-/root}"
+export PATH="${HOME}/.local/bin:${PATH}"
+
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+if ! command -v "${CLAUDE_BIN}" >/dev/null 2>&1; then
+  install_url="${CLAUDE_INSTALL_SCRIPT_URL:-https://claude.ai/install.sh}"
+  version="${CLAUDE_CODE_VERSION:-stable}"
+  echo "ax-harness: ${CLAUDE_BIN} not found on PATH; installing Claude Code (${version})..." >&2
+  curl -fsSL "${install_url}" | bash -s -- "${version}"
+fi
+
+if ! command -v "${CLAUDE_BIN}" >/dev/null 2>&1; then
+  echo "ax-harness: ${CLAUDE_BIN} is still not available on PATH after install" >&2
+  exit 127
+fi
+
+mapfile -d '' -t flag_args < <(python3 - "${config_file}" << 'PY'
+import json
+import re
+import sys
+
+cfg_path = sys.argv[1] if len(sys.argv) > 1 else ""
+cfg = {}
+if cfg_path:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        raw = f.read().strip()
+        if raw:
+            cfg = json.loads(raw)
+
+
+def to_flag(key: str) -> str:
+    if not re.match(r"^[a-z][a-z0-9]*([A-Z][a-z0-9]+)*$", key):
+        raise ValueError(f"spec.config key {key!r} must be camelCase")
+    kebab = re.sub(r"([A-Z])", lambda m: "-" + m.group(1).lower(), key)
+    return "--" + kebab
+
+
+out = []
+for key in sorted(k for k in cfg if k != "prompt"):
+    val = cfg[key]
+    flag = to_flag(key)
+    if isinstance(val, bool):
+        if val:
+            out.append(flag)
+    elif isinstance(val, dict):
+        out.append(f"{flag}={json.dumps(val, separators=(',', ':'))}")
+    elif isinstance(val, list):
+        for elem in val:
+            if isinstance(elem, (dict, list, bool)) or elem is None:
+                raise ValueError(
+                    f"spec.config.{key}: list elements must be strings or numbers"
+                )
+            out.append(f"{flag}={elem}")
+    elif isinstance(val, (str, int, float)):
+        out.append(f"{flag}={val}")
+    elif val is not None:
+        raise ValueError(f"spec.config.{key}: unsupported value {val!r}")
+
+for item in out:
+    sys.stdout.buffer.write(item.encode("utf-8") + b"\0")
+PY
+)
+
+exec "${CLAUDE_BIN}" --print "${flag_args[@]}" -- "$(cat "${goal_file}")"

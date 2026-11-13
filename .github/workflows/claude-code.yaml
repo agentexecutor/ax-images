@@ -1,0 +1,101 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: claude-code
+
+on:
+  pull_request:
+    paths:
+      - 'agents/claude-code/**'
+      - '.github/workflows/claude-code.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'agents/claude-code/**'
+      - '.github/workflows/claude-code.yaml'
+  workflow_dispatch:
+    inputs:
+      claude_code_version:
+        description: 'Claude Code version (e.g. stable, latest, or 2.1.322)'
+        required: false
+        default: 'stable'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit-test:
+    name: Launcher unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test ax-harness launcher
+        run: agents/claude-code/test_harness.sh
+
+  build-and-verify:
+    name: Build & verify (${{ matrix.arch }})
+    needs: unit-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build default runtime-install image (no claude binary baked in)
+        run: |
+          docker build \
+            --build-arg CLAUDE_CODE_VERSION="${{ inputs.claude_code_version || 'stable' }}" \
+            -t "ax-claude-code:runtime-${{ matrix.arch }}" \
+            agents/claude-code
+
+      - name: Verify runtime-install image purity and tools
+        run: |
+          img="ax-claude-code:runtime-${{ matrix.arch }}"
+          if docker run --rm --entrypoint sh "${img}" -c 'test -e /usr/local/bin/ax-task-runner'; then
+            echo "::error::Agent image must not contain /usr/local/bin/ax-task-runner"
+            exit 1
+          fi
+          if docker run --rm --entrypoint sh "${img}" -c 'command -v claude >/dev/null 2>&1 || test -e /root/.local/bin/claude'; then
+            echo "::error::Default runtime-install image must not bundle the claude binary"
+            exit 1
+          fi
+          docker run --rm --entrypoint test "${img}" -x /usr/local/bin/ax-harness
+          docker run --rm --entrypoint git "${img}" --version
+          docker run --rm --entrypoint python3 "${img}" --version
+
+      - name: Verify optional PREINSTALL_CLAUDE=true build (local only, not pushed)
+        run: |
+          img="ax-claude-code:prebaked-${{ matrix.arch }}"
+          docker build \
+            --build-arg PREINSTALL_CLAUDE=true \
+            --build-arg CLAUDE_CODE_VERSION="${{ inputs.claude_code_version || 'stable' }}" \
+            -t "${img}" \
+            agents/claude-code
+          docker run --rm --entrypoint claude "${img}" --version
+          docker rmi "${img}" >/dev/null
